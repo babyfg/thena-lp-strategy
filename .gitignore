@@ -17,9 +17,6 @@ broadcast
 .DS_Store
 *.pem
 
-# Ignore lib
-lib
-
 # Ignore script
 script
 
