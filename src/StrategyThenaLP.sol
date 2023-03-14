@@ -169,14 +169,15 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
     /**
      * @notice Harvest from strategy
      */
-    function harvest() external nonReentrant {
-        // reward amount
-        uint256 rewardAmnt = IERC20(rewardToken).balanceOf(address(this));
-
-        require(rewardAmnt > 0, "No reward to harvest");
+    function harvest() external onlyOwner nonReentrant {
+        uint256 availableReward = pendingReward();
+        require(availableReward > 0, "No reward to harvest");
 
         // withdraw reward from strategy
         IThenaGaugeV2(strategy).getReward();
+
+        // reward amount
+        uint256 rewardAmnt = IERC20(rewardToken).balanceOf(address(this));
 
         // transfer reward usdt to treasury
         uint256 treasuryFee = (rewardAmnt * treasuryFeePercent) / 10000;
