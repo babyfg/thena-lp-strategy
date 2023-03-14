@@ -5,6 +5,7 @@ import {ERC20} from "lib/solmate/src/tokens/ERC20.sol";
 import {SafeERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "lib/openzeppelin-contracts/contracts/access/Ownable.sol";
+import {ReentrancyGuard} from "lib/openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
 
 import "./interfaces/IThenaPair.sol";
 import "./interfaces/IThenaGaugeV2.sol";
@@ -15,12 +16,12 @@ import "./interfaces/IThenaRouter.sol";
 // USDT: 0x55d398326f99059fF775485246999027B3197955
 // FRAX: 0x90c97f71e18723b0cf0dfa30ee176ab653e89f40
 // Want token(USDT): 0x55d398326f99059fF775485246999027B3197955
-// Strategy (LP Pool): 0x4b1f8ac4c46348919b70bcab62443eeafb770aa4
+// Strategy (LP Pool): 0x4b1F8AC4C46348919B70bCAB62443EeAfB770Aa4
 // Thena Router: 0xd4ae6eCA985340Dd434D38F470aCCce4DC78D109
 // Reward Token(Thena): 0xf4c8e32eadec4bfe97e0f595add0f4450a863a11
 
 /// @title Thena LP strategy
-contract StrategyThenaLP is Ownable {
+contract StrategyThenaLP is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // treasury
@@ -45,9 +46,14 @@ contract StrategyThenaLP is Ownable {
         public paths;
 
     // events
-    event Deposited(address indexed user, uint256 indexed balance);
-    event Withdrawed(address indexed user, uint256 indexed balance);
-    event Harvested(address indexed user, uint256 indexed balance);
+    event Deposited(address indexed user, uint256 balance);
+    event Withdrawed(address indexed user, uint256 balance);
+    event Harvested(
+        address indexed user,
+        uint256 harvestedAmnt,
+        uint256 compoundedAmnt,
+        uint256 treasuryFee
+    );
 
     constructor(
         address want_,
@@ -71,11 +77,37 @@ contract StrategyThenaLP is Ownable {
     }
 
     /**
+     * @notice Get pending reward
+     */
+    function pendingReward() public view returns (uint256) {
+        return IThenaGaugeV2(strategy).earned(address(this));
+    }
+
+    /**
+     * @notice Get path
+     * @param inToken_ token address of inToken
+     * @param outToken_ token address of outToken
+     */
+    function getPath(
+        address inToken_,
+        address outToken_
+    ) public view returns (IThenaRouter.ThenaRoute[] memory) {
+        IThenaRouter.ThenaRoute[] memory path = paths[inToken_][outToken_];
+        require(path.length > 1, "Path length is not valid");
+        require(path[0].from == inToken_, "Path is not existed");
+        require(path[path.length - 1].to == outToken_, "Path is not existed");
+
+        return path;
+    }
+
+    /**
      * @notice Deposit into strategy
      */
-    function deposit() external {
+    function deposit() external nonReentrant {
         // get want token balance in contract
         uint256 wantAmnt = IERC20(want).balanceOf(address(this));
+
+        require(wantAmnt > 0, "No want to deposit");
 
         // get lp from want token
         uint256 lpAmount = _getLPFromWant(wantAmnt);
@@ -93,7 +125,7 @@ contract StrategyThenaLP is Ownable {
      * @notice Withdraw from strategy
      * @param lpAmount_ amount of lp
      */
-    function withdraw(uint256 lpAmount_) external onlyOwner {
+    function withdraw(uint256 lpAmount_) external onlyOwner nonReentrant {
         // withdraw from strategy
         IThenaGaugeV2(strategy).withdraw(lpAmount_);
 
@@ -115,7 +147,7 @@ contract StrategyThenaLP is Ownable {
     /**
      * @notice Withdraw all from strategy
      */
-    function withdrawAll() external {
+    function withdrawAll() external onlyOwner nonReentrant {
         // withdraw from strategy
         IThenaGaugeV2(strategy).withdrawAll();
 
@@ -137,29 +169,69 @@ contract StrategyThenaLP is Ownable {
     /**
      * @notice Harvest from strategy
      */
-    function harvest() external {
-        // withdraw from strategy
-        IThenaGaugeV2(strategy).getReward();
-
+    function harvest() external nonReentrant {
         // reward amount
         uint256 rewardAmnt = IERC20(rewardToken).balanceOf(address(this));
 
-        if (rewardAmnt > 0) {
-            // transfer reward allocation to treasury
-            uint256 treasuryFee = (rewardAmnt * treasuryFeePercent) / 10000;
-            IERC20(rewardToken).safeTransfer(treasury, treasuryFee);
+        require(rewardAmnt > 0, "No reward to harvest");
 
-            rewardAmnt = rewardAmnt - treasuryFee;
-            // get LP from reward token
-            uint256 lpAmount = _getLPFromReward(rewardAmnt);
-            IERC20(lp).safeApprove(strategy, 0);
-            IERC20(lp).safeApprove(strategy, lpAmount);
+        // withdraw reward from strategy
+        IThenaGaugeV2(strategy).getReward();
 
-            IThenaGaugeV2(strategy).deposit(lpAmount);
-            emit Deposited(msg.sender, lpAmount);
+        // transfer reward usdt to treasury
+        uint256 treasuryFee = (rewardAmnt * treasuryFeePercent) / 10000;
+        uint256 treasuryFeeInUsdt = _swapOnRouter(
+            rewardToken,
+            want,
+            treasuryFee
+        );
+        IERC20(want).safeTransfer(treasury, treasuryFeeInUsdt);
+
+        // get LP from reward token
+        uint256 compoundAmnt = rewardAmnt - treasuryFee;
+        uint256 lpAmount = _getLPFromReward(compoundAmnt);
+        IERC20(lp).safeApprove(strategy, 0);
+        IERC20(lp).safeApprove(strategy, lpAmount);
+
+        // compound LP to strategy
+        IThenaGaugeV2(strategy).deposit(lpAmount);
+
+        emit Harvested(msg.sender, rewardAmnt, lpAmount, treasuryFeeInUsdt);
+    }
+
+    /**
+     * @notice Set paths from inToken to outToken
+     * @param inToken_ token address of inToken
+     * @param outToken_ token address of outToken
+     * @param paths_ swapping paths
+     */
+    function setPath(
+        address inToken_,
+        address outToken_,
+        IThenaRouter.ThenaRoute[] memory paths_
+    ) external onlyOwner {
+        require(paths_.length > 1, "Invalid paths length");
+        require(inToken_ == paths_[0].from, "Invalid inToken address");
+        require(
+            outToken_ == paths_[paths_.length - 1].to,
+            "Invalid outToken address"
+        );
+
+        uint256 i;
+        for (i; i < paths_.length; i++) {
+            if (i < paths[inToken_][outToken_].length) {
+                paths[inToken_][outToken_][i] = paths_[i];
+            } else {
+                paths[inToken_][outToken_].push(paths_[i]);
+            }
         }
 
-        emit Harvested(msg.sender, rewardAmnt);
+        if (paths[inToken_][outToken_].length > paths_.length)
+            for (
+                i = 0;
+                i < paths[inToken_][outToken_].length - paths_.length;
+                i++
+            ) paths[inToken_][outToken_].pop();
     }
 
     /**
@@ -169,7 +241,6 @@ contract StrategyThenaLP is Ownable {
     function _getLPFromWant(
         uint256 amount_
     ) internal returns (uint256 lpAmount) {
-        // get pair token(FRAX, in this case) from want token via swap
         uint256 wantAmnt = amount_ / 2;
         uint256 pairTokenAmnt = _swapOnRouter(
             want,
@@ -212,15 +283,17 @@ contract StrategyThenaLP is Ownable {
         address token1_,
         uint256 amount_
     ) internal returns (uint256 wantAmnt) {
+        IERC20(lp).safeApprove(thenaRouter, amount_);
         (uint256 amountA, uint256 amountB) = IThenaRouter(thenaRouter)
             .removeLiquidity(
                 token0_,
                 token1_,
+                true, // stable or volatile
                 amount_,
                 0,
                 0,
                 address(this),
-                block.timestamp + 3600
+                block.timestamp
             );
 
         // if token0 is want
@@ -300,6 +373,7 @@ contract StrategyThenaLP is Ownable {
         (, , amountOut) = IThenaRouter(thenaRouter).addLiquidity(
             token0_,
             token1_,
+            true, // stable or volatile
             token0Amnt_,
             token1Amnt_,
             0,
@@ -307,57 +381,5 @@ contract StrategyThenaLP is Ownable {
             address(this),
             block.timestamp
         );
-    }
-
-    /**
-     * @notice Get path
-     * @param inToken_ token address of inToken
-     * @param outToken_ token address of outToken
-     */
-    function getPath(
-        address inToken_,
-        address outToken_
-    ) public view returns (IThenaRouter.ThenaRoute[] memory) {
-        IThenaRouter.ThenaRoute[] memory path = paths[inToken_][outToken_];
-        require(path.length > 1, "Path length is not valid");
-        require(path[0].from == inToken_, "Path is not existed");
-        require(path[path.length - 1].to == outToken_, "Path is not existed");
-
-        return path;
-    }
-
-    /**
-     * @notice Set paths from inToken to outToken
-     * @param inToken_ token address of inToken
-     * @param outToken_ token address of outToken
-     * @param paths_ swapping paths
-     */
-    function setPath(
-        address inToken_,
-        address outToken_,
-        IThenaRouter.ThenaRoute[] memory paths_
-    ) external onlyOwner {
-        require(paths_.length > 1, "Invalid paths length");
-        require(inToken_ == paths_[0].from, "Invalid inToken address");
-        require(
-            outToken_ == paths_[paths_.length - 1].to,
-            "Invalid outToken address"
-        );
-
-        uint256 i;
-        for (i; i < paths_.length; i++) {
-            if (i < paths[inToken_][outToken_].length) {
-                paths[inToken_][outToken_][i] = paths_[i];
-            } else {
-                paths[inToken_][outToken_].push(paths_[i]);
-            }
-        }
-
-        if (paths[inToken_][outToken_].length > paths_.length)
-            for (
-                i = 0;
-                i < paths[inToken_][outToken_].length - paths_.length;
-                i++
-            ) paths[inToken_][outToken_].pop();
     }
 }
