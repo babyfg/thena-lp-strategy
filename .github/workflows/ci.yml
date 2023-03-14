@@ -16,7 +16,7 @@ jobs:
       - name: dependencies
         run: forge install
       - name: tests
-        run: forge test
+        run: forge test -vv --fork-url https://bsc-dataseed1.ninicoin.io
 
   snapshot:
     runs-on: ubuntu-latest
