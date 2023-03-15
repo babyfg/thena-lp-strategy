@@ -243,11 +243,9 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
         uint256 amount_
     ) internal returns (uint256 lpAmount) {
         uint256 wantAmnt = amount_ / 2;
-        uint256 pairTokenAmnt = _swapOnRouter(
-            want,
-            want == lpToken0 ? lpToken1 : lpToken0,
-            wantAmnt
-        );
+        _swapOnRouter(want, want == lpToken0 ? lpToken1 : lpToken0, wantAmnt);
+        uint256 pairTokenAmnt = IERC20(want == lpToken0 ? lpToken1 : lpToken0)
+            .balanceOf(address(this));
 
         // get lp from usdt and frax
         lpAmount = _getLP(
@@ -266,8 +264,10 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
         uint256 amount_
     ) internal returns (uint256 lpAmount) {
         // get pair tokens from reward token
-        uint256 token0Amnt = _swapOnRouter(rewardToken, lpToken0, amount_ / 2);
-        uint256 token1Amnt = _swapOnRouter(rewardToken, lpToken1, amount_ / 2);
+        _swapOnRouter(rewardToken, lpToken0, amount_ / 2);
+        uint256 token0Amnt = IERC20(lpToken0).balanceOf(address(this));
+        _swapOnRouter(rewardToken, lpToken1, amount_ / 2);
+        uint256 token1Amnt = IERC20(lpToken1).balanceOf(address(this));
 
         // get lp from usdt and frax
         lpAmount = _getLP(lpToken0, lpToken1, token0Amnt, token1Amnt);
@@ -300,20 +300,12 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
         // if token0 is want
         if (want == lpToken0) {
             // convert token1 to want
-            uint256 swappedWantAmnt = _swapOnRouter(
-                lpToken1,
-                lpToken0,
-                amountB
-            );
-            wantAmnt = amountA + swappedWantAmnt;
+            _swapOnRouter(lpToken1, lpToken0, amountB);
+            wantAmnt = amountA + IERC20(lpToken0).balanceOf(address(this));
         } else {
             // convert token0 to want
-            uint256 swappedWantAmnt = _swapOnRouter(
-                lpToken0,
-                lpToken1,
-                amountA
-            );
-            wantAmnt = amountB + swappedWantAmnt;
+            _swapOnRouter(lpToken0, lpToken1, amountA);
+            wantAmnt = amountB + IERC20(lpToken1).balanceOf(address(this));
         }
     }
 
