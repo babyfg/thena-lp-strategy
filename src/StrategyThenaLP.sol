@@ -45,6 +45,11 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
     mapping(address => mapping(address => IThenaRouter.ThenaRoute[]))
         public paths;
 
+    // share calculation
+    uint256 public totalWant;
+    uint256 public totalLp;
+    mapping(address => uint256) public depositors;
+
     // events
     event Deposited(address indexed user, uint256 balance);
     event Withdrawed(address indexed user, uint256 balance);
@@ -84,6 +89,14 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @notice Get pending reward
+     */
+    function convertWantToLp(uint256 wantAmnt) public view returns (uint256) {
+        if (totalWant == 0) return wantAmnt;
+        return (wantAmnt * totalLp) / totalWant;
+    }
+
+    /**
      * @notice Get path
      * @param inToken_ token address of inToken
      * @param outToken_ token address of outToken
@@ -102,15 +115,18 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
 
     /**
      * @notice Deposit into strategy
+     * @param wantAmnt_ amount of want
      */
-    function deposit() external nonReentrant {
-        // get want token balance in contract
-        uint256 wantAmnt = IERC20(want).balanceOf(address(this));
+    function deposit(uint256 wantAmnt_) external nonReentrant {
+        require(wantAmnt_ > 0, "Invalid want amount");
 
-        require(wantAmnt > 0, "No want to deposit");
+        IERC20(want).safeTransferFrom(msg.sender, address(this), wantAmnt_);
+        totalWant += wantAmnt_;
+        depositors[msg.sender] += wantAmnt_;
 
         // get lp from want token
-        uint256 lpAmount = _getLPFromWant(wantAmnt);
+        uint256 lpAmount = _getLPFromWant(wantAmnt_);
+        totalLp += lpAmount;
 
         // deposit sAMM USDT/FRAX LP into USDT/FRAX LP
         IERC20(lp).safeApprove(strategy, 0);
@@ -118,52 +134,33 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
 
         IThenaGaugeV2(strategy).deposit(lpAmount);
 
-        emit Deposited(msg.sender, wantAmnt);
+        emit Deposited(msg.sender, wantAmnt_);
     }
 
     /**
      * @notice Withdraw from strategy
-     * @param lpAmount_ amount of lp
+     * @param wantAmnt_ amount of want
      */
-    function withdraw(uint256 lpAmount_) external onlyOwner nonReentrant {
+    function withdraw(uint256 wantAmnt_) external nonReentrant {
+        require(wantAmnt_ > 0, "No want to withdraw");
+        require(wantAmnt_ <= depositors[msg.sender], "Exceed the amount");
+
+        // get lp from want token
+        uint256 lpAmount = convertWantToLp(wantAmnt_);
+        totalWant -= wantAmnt_;
+        totalLp -= lpAmount;
+        depositors[msg.sender] -= wantAmnt_;
+
         // withdraw from strategy
-        IThenaGaugeV2(strategy).withdraw(lpAmount_);
+        uint256 lpAmntBefore = IERC20(lp).balanceOf(address(this));
+        IThenaGaugeV2(strategy).withdraw(lpAmount);
+        uint256 lpAmnt = IERC20(lp).balanceOf(address(this)) - lpAmntBefore;
 
-        // withdrawn lp amount from strategy
-        uint256 lpAmnt = IERC20(lp).balanceOf(address(this));
+        // get want amount from LP
+        uint256 wantAmnt = _getWantFromLP(lpToken0, lpToken1, lpAmnt);
+        IERC20(want).safeTransfer(msg.sender, wantAmnt);
 
-        if (lpAmnt > 0) {
-            // get want amount from LP
-            uint256 wantAmnt = _getWantFromLP(lpToken0, lpToken1, lpAmnt);
-
-            // TODO: transfer want token to vault or other
-
-            emit Withdrawed(msg.sender, wantAmnt);
-        } else {
-            emit Withdrawed(msg.sender, 0);
-        }
-    }
-
-    /**
-     * @notice Withdraw all from strategy
-     */
-    function withdrawAll() external onlyOwner nonReentrant {
-        // withdraw from strategy
-        IThenaGaugeV2(strategy).withdrawAll();
-
-        // withdrawn lp amount from strategy
-        uint256 lpAmnt = IERC20(lp).balanceOf(address(this));
-
-        if (lpAmnt > 0) {
-            // get want amount from LP
-            uint256 wantAmnt = _getWantFromLP(lpToken0, lpToken1, lpAmnt);
-
-            // TODO: transfer want token to vault or other
-
-            emit Withdrawed(msg.sender, wantAmnt);
-        } else {
-            emit Withdrawed(msg.sender, 0);
-        }
+        emit Withdrawed(msg.sender, wantAmnt_);
     }
 
     /**
@@ -191,6 +188,8 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
         // get LP from reward token
         uint256 compoundAmnt = rewardAmnt - treasuryFee;
         uint256 lpAmount = _getLPFromReward(compoundAmnt);
+        totalLp += lpAmount;
+
         IERC20(lp).safeApprove(strategy, 0);
         IERC20(lp).safeApprove(strategy, lpAmount);
 
@@ -300,12 +299,16 @@ contract StrategyThenaLP is Ownable, ReentrancyGuard {
         // if token0 is want
         if (want == lpToken0) {
             // convert token1 to want
+            uint256 lpToken0Before = IERC20(lpToken0).balanceOf(address(this));
             _swapOnRouter(lpToken1, lpToken0, amountB);
-            wantAmnt = amountA + IERC20(lpToken0).balanceOf(address(this));
+            uint256 lpToken0After = IERC20(lpToken0).balanceOf(address(this));
+            wantAmnt = amountA + lpToken0After - lpToken0Before;
         } else {
             // convert token0 to want
+            uint256 lpToken1Before = IERC20(lpToken1).balanceOf(address(this));
             _swapOnRouter(lpToken0, lpToken1, amountA);
-            wantAmnt = amountB + IERC20(lpToken1).balanceOf(address(this));
+            uint256 lpToken1After = IERC20(lpToken1).balanceOf(address(this));
+            wantAmnt = amountB + lpToken1After - lpToken1Before;
         }
     }
 

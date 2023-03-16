@@ -157,8 +157,8 @@ contract StrategyThenaLPTest is Test {
     function test_failed_Deposit_when_no_want_token() external {
         vm.prank(user1);
 
-        vm.expectRevert("No want to deposit");
-        strategy.deposit();
+        vm.expectRevert("Invalid want amount");
+        strategy.deposit(0);
     }
 
     function test_success_Deposit() external {
@@ -166,26 +166,32 @@ contract StrategyThenaLPTest is Test {
         IERC20(usdt).approve(address(strategy), 100e18);
 
         vm.prank(user1);
-        IERC20(usdt).transfer(address(strategy), 100e18);
-
-        vm.prank(user1);
-        strategy.deposit();
+        strategy.deposit(100e18);
     }
 
-    function test_success_WithdrawAll() external {
-        // deposit
+    function test_success_Withdraw() external {
         vm.prank(user1);
         IERC20(usdt).approve(address(strategy), 100e18);
 
         vm.prank(user1);
-        IERC20(usdt).transfer(address(strategy), 100e18);
-
-        vm.prank(user1);
-        strategy.deposit();
+        strategy.deposit(100e18);
 
         // withdraw
-        vm.prank(owner);
-        strategy.withdrawAll();
+        vm.prank(user1);
+        vm.expectRevert("No want to withdraw");
+        strategy.withdraw(0);
+
+        vm.prank(user1);
+        vm.expectRevert("Exceed the amount");
+        strategy.withdraw(200e18);
+
+        vm.prank(user1);
+        uint256 usdtBefore = IERC20(usdt).balanceOf(user1);
+        vm.prank(user1);
+        strategy.withdraw(100e18);
+        uint256 usdtAfter = IERC20(usdt).balanceOf(user1);
+
+        assertGt(usdtAfter, usdtBefore);
     }
 
     function test_success_Harvest() external {
@@ -194,10 +200,7 @@ contract StrategyThenaLPTest is Test {
         IERC20(usdt).approve(address(strategy), 100e18);
 
         vm.prank(user1);
-        IERC20(usdt).transfer(address(strategy), 100e18);
-
-        vm.prank(user1);
-        strategy.deposit();
+        strategy.deposit(100e18);
 
         // skip 7 days
         skip(7 days);
